@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG_LEO | PDF Q&A Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🦁 RAG_LEO</h1>
+            <p class="subtitle">Ask questions from your PDF — powered by LangChain & FAISS</p>
+        </header>
+
+        <!-- Document Management Section -->
+        <div class="content-wrapper">
+            <div class="documents-section">
+                <div class="section-header">
+                    <h2>📚 Your Documents</h2>
+                    <button id="refreshDocs" class="btn-secondary">🔄 Refresh</button>
+                </div>
+                <div id="documentsList" class="documents-list">
+                    <p class="loading">Loading documents...</p>
+                </div>
+            </div>
+
+            <hr>
+
+            <!-- Upload Section -->
+            <div class="upload-section">
+                <h2>📤 Upload PDF</h2>
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="pdfFile" name="file" accept=".pdf" required>
+                        <label for="pdfFile" class="file-label">
+                            <span id="fileName">Choose PDF file...</span>
+                        </label>
+                    </div>
+                    <button type="submit" class="btn-primary" id="uploadBtn">
+                        <span class="btn-text">Upload & Process</span>
+                        <span class="btn-loading" style="display: none;">Processing...</span>
+                    </button>
+                </form>
+                <div id="uploadStatus" class="status-message"></div>
+                <div id="uploadProgress" class="progress-bar" style="display: none;">
+                    <div class="progress-fill"></div>
+                </div>
+            </div>
+
+            <hr>
+        </div>
+
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <div class="section-header">
+                <h2>💬 Ask Questions</h2>
+                <button id="clearChat" class="btn-secondary">🗑️ Clear Chat</button>
+            </div>
+
+            <div class="chat-box">
+                <div class="chat" id="chat">
+                    <div class="welcome-message">
+                        <p>👋 Welcome to RAG_LEO!</p>
+                        <p>Upload a PDF document and start asking questions about its content.</p>
+                    </div>
+                </div>
+
+                <form id="queryForm" class="query-form">
+                    <select id="docSelect" class="doc-select" required>
+                        <option value="">Select a document...</option>
+                    </select>
+                    <div class="input-wrapper">
+                        <input type="text" id="question" placeholder="Ask something about your PDF..." required>
+                        <button type="submit" class="btn-ask" id="askBtn">
+                            <span class="btn-text">Ask</span>
+                            <span class="btn-loading" style="display: none;">⏳</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let currentDocId = null;
+        let documents = [];
+
+        // DOM elements
+        const uploadForm = document.getElementById("uploadForm");
+        const queryForm = document.getElementById("queryForm");
+        const chat = document.getElementById("chat");
+        const uploadStatus = document.getElementById("uploadStatus");
+        const uploadProgress = document.getElementById("uploadProgress");
+        const documentsList = document.getElementById("documentsList");
+        const docSelect = document.getElementById("docSelect");
+        const pdfFileInput = document.getElementById("pdfFile");
+        const fileNameDisplay = document.getElementById("fileName");
+        const clearChatBtn = document.getElementById("clearChat");
+        const refreshDocsBtn = document.getElementById("refreshDocs");
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadDocuments();
+        });
+
+        // File input change handler
+        pdfFileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                fileNameDisplay.textContent = file.name;
+                fileNameDisplay.classList.add('file-selected');
+            } else {
+                fileNameDisplay.textContent = 'Choose PDF file...';
+                fileNameDisplay.classList.remove('file-selected');
+            }
+        });
+
+        // Load documents from server
+        async function loadDocuments() {
+            try {
+                const response = await fetch("/documents");
+                const result = await response.json();
+                documents = result.documents || [];
+
+                displayDocuments();
+                updateDocumentSelect();
+
+                if (documents.length === 0) {
+                    documentsList.innerHTML = '<p class="no-documents">No documents uploaded yet. Upload your first PDF to get started!</p>';
+                }
+            } catch (error) {
+                console.error("Error loading documents:", error);
+                documentsList.innerHTML = '<p class="error">Failed to load documents.</p>';
+            }
+        }
+
+        // Display documents list
+        function displayDocuments() {
+            if (documents.length === 0) return;
+
+            documentsList.innerHTML = documents.map(doc => `
+                <div class="document-item ${doc.doc_id === currentDocId ? 'active' : ''}" data-doc-id="${doc.doc_id}">
+                    <div class="doc-info">
+                        <span class="doc-name">📄 ${doc.filename}</span>
+                        <span class="doc-id">ID: ${doc.doc_id.substring(0, 8)}...</span>
+                    </div>
+                    <div class="doc-actions">
+                        <button class="btn-select" onclick="selectDocument('${doc.doc_id}', '${doc.filename}')">
+                            ${doc.doc_id === currentDocId ? '✓ Selected' : 'Select'}
+                        </button>
+                        <button class="btn-delete" onclick="deleteDocument('${doc.doc_id}', '${doc.filename}')">
+                            🗑️
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Update document select dropdown
+        function updateDocumentSelect() {
+            docSelect.innerHTML = '<option value="">Select a document...</option>' +
+                documents.map(doc =>
+                    `<option value="${doc.doc_id}" ${doc.doc_id === currentDocId ? 'selected' : ''}>
+                        ${doc.filename}
+                    </option>`
+                ).join('');
+        }
+
+        // Select document
+        function selectDocument(docId, filename) {
+            currentDocId = docId;
+            docSelect.value = docId;
+            displayDocuments();
+            showStatusMessage(`Selected: ${filename}`, 'success');
+        }
+
+        // Delete document
+        async function deleteDocument(docId, filename) {
+            if (!confirm(`Are you sure you want to delete "${filename}"?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/document/${docId}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatusMessage(`Deleted: ${filename}`, 'success');
+                    if (currentDocId === docId) {
+                        currentDocId = null;
+                    }
+                    await loadDocuments();
+                } else {
+                    showStatusMessage(result.error || 'Failed to delete document', 'error');
+                }
+            } catch (error) {
+                console.error("Error deleting document:", error);
+                showStatusMessage('Failed to delete document', 'error');
+            }
+        }
+
+        // Upload form handler
+        uploadForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+
+            const formData = new FormData(uploadForm);
+            const uploadBtn = document.getElementById('uploadBtn');
+
+            // Show loading state
+            uploadBtn.disabled = true;
+            uploadBtn.querySelector('.btn-text').style.display = 'none';
+            uploadBtn.querySelector('.btn-loading').style.display = 'inline';
+            uploadProgress.style.display = 'block';
+
+            showStatusMessage("Processing PDF... This may take a moment.", 'info');
+
+            try {
+                const response = await fetch("/upload", {
+                    method: "POST",
+                    body: formData
+                });
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatusMessage(
+                        `✓ ${result.filename} uploaded successfully! (${result.chunks_count} chunks created)`,
+                        'success'
+                    );
+
+                    // Reset form
+                    uploadForm.reset();
+                    fileNameDisplay.textContent = 'Choose PDF file...';
+                    fileNameDisplay.classList.remove('file-selected');
+
+                    // Reload documents and select the new one
+                    await loadDocuments();
+                    selectDocument(result.doc_id, result.filename);
+                } else {
+                    showStatusMessage(result.error || "Upload failed", 'error');
+                }
+            } catch (error) {
+                console.error("Upload error:", error);
+                showStatusMessage("Upload failed. Please try again.", 'error');
+            } finally {
+                // Reset button state
+                uploadBtn.disabled = false;
+                uploadBtn.querySelector('.btn-text').style.display = 'inline';
+                uploadBtn.querySelector('.btn-loading').style.display = 'none';
+                uploadProgress.style.display = 'none';
+            }
+        });
+
+        // Query form handler
+        queryForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+
+            const question = document.getElementById("question").value.trim();
+            const selectedDocId = docSelect.value;
+
+            if (!question || !selectedDocId) {
+                showStatusMessage("Please select a document and enter a question", 'error');
+                return;
+            }
+
+            // Remove welcome message if present
+            const welcomeMsg = chat.querySelector('.welcome-message');
+            if (welcomeMsg) {
+                welcomeMsg.remove();
+            }
+
+            // Add user message
+            addMessage(question, 'user');
+            document.getElementById("question").value = "";
+
+            // Show loading indicator
+            const loadingId = addMessage("Thinking...", 'bot', true);
+            const askBtn = document.getElementById('askBtn');
+            askBtn.disabled = true;
+            askBtn.querySelector('.btn-text').style.display = 'none';
+            askBtn.querySelector('.btn-loading').style.display = 'inline';
+
+            try {
+                const response = await fetch("/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        query: question,
+                        doc_id: selectedDocId,
+                        top_k: 4
+                    })
+                });
+                const result = await response.json();
+
+                // Remove loading message
+                document.getElementById(loadingId).remove();
+
+                if (response.ok) {
+                    addMessage(result.answer, 'bot');
+
+                    // Optionally show retrieved chunks in collapsed section
+                    if (result.retrieved_chunks && result.retrieved_chunks.length > 0) {
+                        addRetrievedChunks(result.retrieved_chunks);
+                    }
+                } else {
+                    addMessage(`Error: ${result.error}`, 'bot error');
+                }
+            } catch (error) {
+                console.error("Query error:", error);
+                document.getElementById(loadingId).remove();
+                addMessage("Failed to get answer. Please try again.", 'bot error');
+            } finally {
+                askBtn.disabled = false;
+                askBtn.querySelector('.btn-text').style.display = 'inline';
+                askBtn.querySelector('.btn-loading').style.display = 'none';
+            }
+        });
+
+        // Add message to chat
+        function addMessage(text, type, isLoading = false) {
+            const msgId = 'msg-' + Date.now();
+            const msgDiv = document.createElement('div');
+            msgDiv.id = msgId;
+            msgDiv.className = `message ${type}-msg ${isLoading ? 'loading' : ''}`;
+
+            const label = type === 'user' ? 'You' : 'RAG_LEO';
+            msgDiv.innerHTML = `<strong>${label}:</strong> <span class="msg-text">${text}</span>`;
+
+            chat.appendChild(msgDiv);
+            chat.scrollTop = chat.scrollHeight;
+
+            return msgId;
+        }
+
+        // Add retrieved chunks (collapsible)
+        function addRetrievedChunks(chunks) {
+            const chunksDiv = document.createElement('div');
+            chunksDiv.className = 'retrieved-chunks';
+            chunksDiv.innerHTML = `
+                <details>
+                    <summary>📚 View ${chunks.length} retrieved chunks</summary>
+                    <div class="chunks-content">
+                        ${chunks.map((chunk, i) => `
+                            <div class="chunk-item">
+                                <strong>Chunk ${i + 1}:</strong>
+                                <p>${chunk}</p>
+                            </div>
+                        `).join('')}
+                    </div>
+                </details>
+            `;
+            chat.appendChild(chunksDiv);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        // Clear chat
+        clearChatBtn.addEventListener('click', () => {
+            if (confirm('Clear all chat messages?')) {
+                chat.innerHTML = `
+                    <div class="welcome-message">
+                        <p>👋 Chat cleared!</p>
+                        <p>Ask a new question about your documents.</p>
+                    </div>
+                `;
+            }
+        });
+
+        // Refresh documents
+        refreshDocsBtn.addEventListener('click', () => {
+            loadDocuments();
+            showStatusMessage('Documents refreshed', 'success');
+        });
+
+        // Show status message
+        function showStatusMessage(message, type = 'info') {
+            uploadStatus.textContent = message;
+            uploadStatus.className = `status-message ${type}`;
+            uploadStatus.style.display = 'block';
+
+            setTimeout(() => {
+                uploadStatus.style.display = 'none';
+            }, 5000);
+        }
+
+        // Document select change handler
+        docSelect.addEventListener('change', (e) => {
+            currentDocId = e.target.value;
+            displayDocuments();
+        });
+    </script>
+</body>
+
+</html>

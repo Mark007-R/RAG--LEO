@@ -1,0 +1,9 @@
+flask
+langchain
+faiss-cpu
+sentence-transformers
+PyPDF2
+transformers
+torch
+numpy
+python-multipart
