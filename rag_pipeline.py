@@ -1,16 +1,14 @@
 import os
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
 import faiss
 import numpy as np
 from utils import save_pickle, load_pickle
-
-# For generation
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -18,24 +16,35 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     """
     Retrieval-Augmented Generation pipeline for document Q&A.
-    Uses free models: sentence-transformers for embeddings and FLAN-T5 for generation.
+    Uses sentence-transformers for embeddings and Groq/Llama 3 for generation.
     """
     
     def __init__(
         self, 
         embed_model_name: str = 'sentence-transformers/all-MiniLM-L6-v2',
-        gen_model_name: str = 'google/flan-t5-base', 
-        device: Optional[str] = None
+        groq_model_name: str = 'llama-3.1-8b-instant',
+        api_key: Optional[str] = None,
     ):
         """
-        Initialize RAG pipeline with embedding and generation models.
+        Initialize RAG pipeline with embedding and Groq/Llama 3 generation models.
         
         Args:
             embed_model_name: HuggingFace model for embeddings (free)
-            gen_model_name: HuggingFace model for text generation (free)
-            device: Device to run models on ('cuda' or 'cpu')
+            groq_model_name: Groq model name (e.g., 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile')
+            api_key: Groq API key (if not in environment variables)
         """
-        logger.info("Initializing RAG Pipeline...")
+        logger.info("Initializing RAG Pipeline with Groq/Llama 3...")
+        
+        # Set Groq API key from parameter or environment
+        if api_key:
+            os.environ['GROQ_API_KEY'] = api_key
+        
+        groq_api_key = os.environ.get('GROQ_API_KEY')
+        if not groq_api_key:
+            raise ValueError(
+                "Groq API key not found. Set GROQ_API_KEY environment variable "
+                "or pass api_key parameter to RAGPipeline."
+            )
         
         # Embedding model (sentence-transformers)
         try:
@@ -45,18 +54,19 @@ class RAGPipeline:
             logger.error(f"Failed to load embedding model: {e}")
             raise
         
-        # Device selection
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {self.device}")
-        
-        # Generation model (transformers seq2seq)
+        # Initialize Groq/Llama 3 model via LangChain
         try:
-            self.gen_tokenizer = AutoTokenizer.from_pretrained(gen_model_name)
-            self.gen_model = AutoModelForSeq2SeqLM.from_pretrained(gen_model_name).to(self.device)
-            self.gen_model.eval()  # Set to evaluation mode
-            logger.info(f"Loaded generation model: {gen_model_name}")
+            self.llm = ChatGroq(
+                model=groq_model_name,
+                temperature=0.7,
+                max_tokens=256,
+                timeout=30,
+                max_retries=2
+            )
+            self.groq_model_name = groq_model_name
+            logger.info(f"Loaded Groq/Llama 3 model: {groq_model_name}")
         except Exception as e:
-            logger.error(f"Failed to load generation model: {e}")
+            logger.error(f"Failed to initialize Groq/Llama 3 model: {e}")
             raise
         
         # In-memory state (per-document)
@@ -171,7 +181,7 @@ class RAGPipeline:
             embeddings = self.embedder.encode(
                 self.text_chunks, 
                 show_progress_bar=True,
-                batch_size=32,  # Process in batches for efficiency
+                batch_size=32,
                 convert_to_numpy=True
             )
             embeddings = embeddings.astype('float32')
@@ -183,7 +193,7 @@ class RAGPipeline:
             self.embedding_dim = dim
             
             # Create FAISS index (using IndexFlatIP for normalized vectors)
-            index = faiss.IndexFlatIP(dim)  # Inner Product for normalized vectors
+            index = faiss.IndexFlatIP(dim)
             index.add(embeddings)
             
             self.index = index
@@ -281,7 +291,7 @@ class RAGPipeline:
         try:
             # Encode query
             q_emb = self.embedder.encode([query], convert_to_numpy=True).astype('float32')
-            faiss.normalize_L2(q_emb)  # Normalize for cosine similarity
+            faiss.normalize_L2(q_emb)
             
             # Search
             distances, indices = self.index.search(q_emb, top_k)
@@ -306,20 +316,18 @@ class RAGPipeline:
         query: str, 
         retrieved_chunks: List[str], 
         max_source_chars: int = 2000,
-        max_length: int = 256, 
         temperature: float = 0.7,
-        num_beams: int = 4
+        max_tokens: int = 256
     ) -> str:
         """
-        Generate answer using retrieved context and query.
+        Generate answer using Groq/Llama 3 with retrieved context and query.
         
         Args:
             query: User query
             retrieved_chunks: List of relevant text chunks
             max_source_chars: Maximum context characters to use
-            max_length: Maximum tokens in generated answer
             temperature: Sampling temperature (higher = more creative)
-            num_beams: Number of beams for beam search
+            max_tokens: Maximum tokens in generated answer
             
         Returns:
             Generated answer
@@ -332,41 +340,22 @@ class RAGPipeline:
             context = "\n\n".join(retrieved_chunks)
             context = context[:max_source_chars]
             
-            # Create prompt
-            prompt = (
-                "You are a helpful assistant that answers questions based on the provided context. "
-                "Answer the question clearly and concisely using only the information from the context. "
-                "If the context doesn't contain enough information, say so.\n\n"
-                f"Context:\n{context}\n\n"
-                f"Question: {query}\n\n"
-                f"Answer:"
-            )
+            # Create prompt template using LangChain
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are a helpful assistant that answers questions based on the provided context. "
+                          "Answer the question clearly and concisely using only the information from the context. "
+                          "If the context doesn't contain enough information, say so."),
+                ("user", "Context:\n{context}\n\nQuestion: {query}\n\nAnswer:")
+            ])
             
-            # Tokenize
-            inputs = self.gen_tokenizer(
-                prompt, 
-                return_tensors='pt', 
-                truncation=True, 
-                max_length=1024
-            ).to(self.device)
+            # Format messages
+            messages = prompt.format_messages(context=context, query=query)
             
-            # Generate with improved parameters
-            with torch.no_grad():
-                outputs = self.gen_model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    num_beams=num_beams,
-                    temperature=temperature,
-                    do_sample=temperature > 0,
-                    top_p=0.9,
-                    early_stopping=True,
-                    no_repeat_ngram_size=3
-                )
+            # Generate answer using Groq/Llama 3
+            response = self.llm.invoke(messages)
+            answer = response.content
             
-            # Decode
-            answer = self.gen_tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            logger.info(f"Generated answer ({len(answer)} chars)")
+            logger.info(f"Generated answer ({len(answer)} chars) using {self.groq_model_name}")
             
             return answer.strip()
             
@@ -380,6 +369,7 @@ class RAGPipeline:
             'doc_id': self.doc_id,
             'chunks_count': len(self.text_chunks),
             'index_loaded': self.index is not None,
-            'device': self.device,
+            'embedding_model': 'sentence-transformers/all-MiniLM-L6-v2',
+            'generation_model': self.groq_model_name,
             'embedding_dim': self.embedding_dim
         }
