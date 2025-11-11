@@ -6,6 +6,10 @@ from flask import Flask, request, jsonify, render_template
 from werkzeug.utils import secure_filename
 from rag_pipeline import RAGPipeline
 from utils import ensure_dirs, save_pickle
+from dotenv import load_dotenv
+
+# Load environment variables from .env file FIRST
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
