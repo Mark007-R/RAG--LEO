@@ -29,3 +29,5 @@ tmp/
 temp/
 Thumbs.db
 .DS_Store
+indexes/
+metadata/
